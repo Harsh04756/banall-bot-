@@ -29,7 +29,7 @@ async def validate_session(session_string, api_id, api_hash):
     except Exception as e:
         return False, str(e)
 
-async def destroy_worker(chat_id, member_ids, worker_id, session_string, status_callback):
+async def destroy_worker(chat_id, member_ids, worker_id, session_string):
     client = Client(f"destroy_w_{worker_id}", session_string=session_string, 
                    api_id=API_ID, api_hash=API_HASH, in_memory=True)
     await client.start()
@@ -38,14 +38,12 @@ async def destroy_worker(chat_id, member_ids, worker_id, session_string, status_
     total = len(member_ids)
     flood_count = 0
     
-    print(f"🔥 Worker {worker_id + 1}: Started, {total} members to ban")
-    
     for idx, member_id in enumerate(member_ids):
         try:
             await client.ban_chat_member(chat_id, member_id)
             banned += 1
             
-            if banned % 100 == 0:
+            if banned % 50 == 0:
                 print(f"💀 Worker {worker_id + 1}: {banned}/{total} banned")
                 
         except Exception as e:
@@ -65,15 +63,13 @@ async def destroy_worker(chat_id, member_ids, worker_id, session_string, status_
                 continue
     
     await client.stop()
-    print(f"✅ Worker {worker_id + 1}: Completed, banned {banned} members")
     return banned, flood_count
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
     await message.reply_text(
         f"💀 DESTROY MODE BOT 💀\n\n"
-        f"⚡ Workers: {WORKER_COUNT}\n"
-        f"🔥 Speed: {WORKER_COUNT*5}-{WORKER_COUNT*7} bans/sec\n\n"
+        f"⚡ Workers: {WORKER_COUNT}\n\n"
         f"Send your Pyrogram session string\n"
         f"Then send: /destroy group_link_or_id\n\n"
         f"⚠️ Your account must be admin in the group"
@@ -102,6 +98,9 @@ async def destroy_command(client, message):
     status_msg = await message.reply_text(f"💀 INITIALIZING...")
     
     user_client = None
+    chat_id = None
+    chat_title = "Unknown"
+    
     try:
         user_client = Client("user", session_string=session_string, api_id=API_ID, api_hash=API_HASH, in_memory=True)
         await user_client.start()
@@ -109,90 +108,83 @@ async def destroy_command(client, message):
         me = await user_client.get_me()
         await status_msg.edit_text(f"✅ Logged in as: {me.first_name}\n\n🔍 Accessing group...")
         
-        chat_id = None
-        chat = None
-        
-        # Handle different types of links
-        try:
-            # Case 1: Private invite link (t.me/+something)
-            if "+" in chat_input:
-                invite_hash = chat_input.split("+")[-1]
-                await status_msg.edit_text(f"🔗 Joining private group with invite link...")
-                try:
-                    chat = await user_client.join_chat(invite_hash)
-                    chat_id = chat.id
-                    await status_msg.edit_text(f"✅ Joined group: {chat.title}")
-                except Exception as e:
-                    if "USER_ALREADY_PARTICIPANT" in str(e):
-                        # Already joined, just get chat info
-                        await status_msg.edit_text(f"✅ Already a member, fetching group info...")
-                        invite_hash_full = chat_input.split("t.me/")[-1]
-                        for dialog in user_client.get_dialogs():
-                            if dialog.chat.invite_link == chat_input or str(dialog.chat.id) == invite_hash_full:
-                                chat = dialog.chat
-                                chat_id = chat.id
+        # Extract invite hash from private link
+        if "t.me/+" in chat_input:
+            invite_hash = chat_input.split("t.me/+")[-1]
+            await status_msg.edit_text(f"🔗 Joining group using invite link...")
+            
+            try:
+                # Join the group using the session
+                chat = await user_client.join_chat(invite_hash)
+                chat_id = chat.id
+                chat_title = chat.title
+                await status_msg.edit_text(f"✅ Joined group: {chat_title}")
+            except Exception as e:
+                error_str = str(e)
+                if "USER_ALREADY_PARTICIPANT" in error_str:
+                    await status_msg.edit_text(f"✅ Already a member, fetching group info...")
+                    # Get chat by invite hash
+                    try:
+                        # Try to resolve via get_chat
+                        chat = await user_client.get_chat(invite_hash)
+                        chat_id = chat.id
+                        chat_title = chat.title
+                    except:
+                        # Search in dialogs
+                        async for dialog in user_client.get_dialogs():
+                            if dialog.chat.invite_link and invite_hash in dialog.chat.invite_link:
+                                chat_id = dialog.chat.id
+                                chat_title = dialog.chat.title
                                 break
                         if not chat_id:
-                            await status_msg.edit_text(f"❌ You are not a member of this private group\n\nJoin the group first using your Telegram app")
+                            await status_msg.edit_text(f"❌ Cannot find group. Please join manually first.")
                             return
-                    else:
-                        raise e
-            
-            # Case 2: Public link (t.me/username)
-            elif "t.me/" in chat_input and "+" not in chat_input:
-                username = chat_input.split("t.me/")[-1]
-                await status_msg.edit_text(f"🔍 Getting public group info...")
+                else:
+                    await status_msg.edit_text(f"❌ Cannot join: {error_str[:100]}")
+                    return
+        
+        # Public link or username
+        elif "t.me/" in chat_input:
+            username = chat_input.split("t.me/")[-1]
+            await status_msg.edit_text(f"🔍 Getting group info...")
+            try:
                 chat = await user_client.get_chat(username)
                 chat_id = chat.id
-                await status_msg.edit_text(f"✅ Found group: {chat.title}")
-            
-            # Case 3: Direct ID
-            elif chat_input.lstrip("-").isdigit():
-                chat_id = int(chat_input)
-                chat = await user_client.get_chat(chat_id)
-                await status_msg.edit_text(f"✅ Found group: {chat.title}")
-            
-            else:
-                await status_msg.edit_text("❌ Invalid format. Use: /destroy https://t.me/+invite or /destroy -100123456789")
-                return
-                
-        except Exception as e:
-            error_msg = str(e)
-            if "USER_NOT_PARTICIPANT" in error_msg:
-                await status_msg.edit_text(
-                    f"❌ Your account is NOT a member of this group\n\n"
-                    f"Solution:\n"
-                    f"1. Open Telegram on your phone\n"
-                    f"2. Click the invite link: {chat_input}\n"
-                    f"3. Press 'Join Group'\n"
-                    f"4. Then use /destroy again\n\n"
-                    f"Or get the Group ID using @userinfobot"
-                )
-                return
-            else:
-                await status_msg.edit_text(f"❌ Error: {error_msg[:150]}")
+                chat_title = chat.title
+                await status_msg.edit_text(f"✅ Found group: {chat_title}")
+            except Exception as e:
+                await status_msg.edit_text(f"❌ Cannot find group: {str(e)[:100]}")
                 return
         
-        await status_msg.edit_text(f"👑 Checking admin permissions in {chat.title}...")
+        # Direct ID
+        elif chat_input.lstrip("-").isdigit():
+            chat_id = int(chat_input)
+            chat = await user_client.get_chat(chat_id)
+            chat_title = chat.title
+            await status_msg.edit_text(f"✅ Found group: {chat_title}")
+        
+        else:
+            await status_msg.edit_text("❌ Invalid format. Use: /destroy https://t.me/+invitecode")
+            return
+        
+        await status_msg.edit_text(f"👑 Checking admin permissions in {chat_title}...")
         
         try:
             member = await user_client.get_chat_member(chat_id, me.id)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Cannot verify admin status: {str(e)[:100]}")
+            await status_msg.edit_text(f"❌ Cannot check admin: {str(e)[:100]}\n\nMake sure you are a member of the group")
             return
         
         if member.status == ChatMemberStatus.OWNER:
-            has_ban_right = True
             await status_msg.edit_text(f"✅ You are GROUP OWNER")
         elif member.status == ChatMemberStatus.ADMINISTRATOR:
             if member.privileges and member.privileges.can_restrict_members:
-                has_ban_right = True
                 await status_msg.edit_text(f"✅ You are ADMIN with ban permission")
             else:
                 await status_msg.edit_text("❌ You are admin but NO BAN PERMISSION")
                 return
         else:
-            await status_msg.edit_text(f"❌ You are NOT admin\n\nMake your account admin in the group first")
+            await status_msg.edit_text(f"❌ You are NOT admin\n\nStatus: {member.status}\n\nMake your account admin first")
             return
         
         await status_msg.edit_text(f"📥 Fetching member list...")
@@ -213,10 +205,9 @@ async def destroy_command(client, message):
         
         await status_msg.edit_text(
             f"💀 DESTROY MODE ENGAGED 💀\n\n"
-            f"📛 Group: {chat.title}\n"
-            f"👥 Members to destroy: {total}\n"
-            f"🔧 Workers: {WORKER_COUNT}\n"
-            f"🌊 Flood waits: Auto-resume\n\n"
+            f"📛 Group: {chat_title}\n"
+            f"👥 Members: {total}\n"
+            f"🔧 Workers: {WORKER_COUNT}\n\n"
             f"🔥 STARTING DESTRUCTION..."
         )
         
@@ -233,7 +224,7 @@ async def destroy_command(client, message):
         tasks = []
         for i, chunk in enumerate(chunks):
             if len(chunk) > 0:
-                task = destroy_worker(chat_id, chunk, i, session_string, status_msg.edit_text)
+                task = destroy_worker(chat_id, chunk, i, session_string)
                 tasks.append(task)
         
         results = await asyncio.gather(*tasks)
@@ -287,8 +278,7 @@ async def save_session(client, message):
         f"✅ Session ready!\n\n"
         f"👤 Account: {result.first_name}\n"
         f"🔧 Workers: {WORKER_COUNT}\n\n"
-        f"Send: /destroy group_link_or_id\n\n"
-        f"⚠️ Join the group first with your Telegram account"
+        f"Send: /destroy https://t.me/+invitecode"
     )
 
 if __name__ == "__main__":
