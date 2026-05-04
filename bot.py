@@ -1,16 +1,30 @@
 import asyncio
 import re
 import os
+import sys
 from pyrogram import Client, filters
+from pyrogram.types import Message
 from pyrogram.enums import ChatMemberStatus
 from asyncio import Semaphore
 import time
 
-PI_ID = ""
-API_HASH = ""
-BOT_TOKEN = ""
+def get_env_var(var_name):
+    value = os.getenv(var_name)
+    if not value:
+        print(f"ERROR: {var_name} environment variable is not set")
+        sys.exit(1)
+    return value
+
+API_ID = int(get_env_var("API_ID"))
+API_HASH = get_env_var("API_HASH")
+BOT_TOKEN = get_env_var("BOT_TOKEN")
 
 temp_sessions = {}
+
+print("Starting Ban All Bot...")
+print(f"API_ID: {API_ID}")
+print(f"API_HASH: {API_HASH[:5]}...")
+print(f"BOT_TOKEN: {BOT_TOKEN[:5]}...")
 
 app = Client("ban_bot", api_id=API_ID, api_hash=API_HASH, bot_token=BOT_TOKEN)
 
@@ -33,6 +47,16 @@ async def ban_chunk(client, chat_id, user_chunk, semaphore, chunk_num):
             except Exception:
                 pass
         return banned
+
+@app.on_message(filters.private & filters.command("start"))
+async def start(client, message):
+    await message.reply_text(
+        "⚡ Ultra Fast Ban Bot\n\n"
+        "1. Send me your Pyrogram session string\n"
+        "2. Then send: /startban group_link_or_id\n\n"
+        "You must have admin + ban permission in the group\n"
+        "Session is never saved - deleted after ban completes"
+    )
 
 @app.on_message(filters.private & filters.command("startban"))
 async def startban(client, message):
@@ -85,7 +109,7 @@ async def startban(client, message):
             await status_msg.edit_text("No members to ban")
             return
         
-        await status_msg.edit_text(f"🚀 Banning {total} members at maximum speed...")
+        await status_msg.edit_text(f"🚀 Banning {total} members...")
         
         chunk_size = 50
         chunks = [member_ids[i:i + chunk_size] for i in range(0, len(member_ids), chunk_size)]
@@ -111,6 +135,7 @@ async def startban(client, message):
         
     except Exception as e:
         await status_msg.edit_text(f"Error: {str(e)[:100]}")
+        print(f"Error in startban: {e}")
     finally:
         if user_client:
             await user_client.stop()
@@ -127,4 +152,5 @@ async def save_session(client, message):
         await message.reply_text("Invalid session string")
 
 if __name__ == "__main__":
+    print("Bot started successfully!")
     app.run()
