@@ -20,6 +20,7 @@ API_HASH = get_env_var("API_HASH")
 BOT_TOKEN = get_env_var("BOT_TOKEN")
 
 temp_sessions = {}
+processing_users = set()
 
 print("Starting Ban All Bot...")
 
@@ -69,6 +70,10 @@ async def start(client, message):
 async def startban(client, message):
     user_id = message.from_user.id
     
+    if user_id in processing_users:
+        await message.reply_text("⏳ Please wait, your previous command is still processing")
+        return
+    
     if user_id not in temp_sessions:
         await message.reply_text("❌ Please send your Pyrogram session string first")
         return
@@ -77,12 +82,14 @@ async def startban(client, message):
         await message.reply_text("❌ Usage: /startban group_link_or_id\n\nExample: /startban https://t.me/yourgroup")
         return
     
+    processing_users.add(user_id)
     session_string = temp_sessions[user_id]
     chat_input = message.command[1]
     chat_id = extract_chat_id(chat_input)
     
     if not chat_id:
         await message.reply_text("❌ Invalid group link or ID\n\nUse format: https://t.me/username or -100123456789")
+        processing_users.discard(user_id)
         return
     
     status_msg = await message.reply_text("🔍 Checking admin permissions...")
@@ -99,10 +106,12 @@ async def startban(client, message):
             member = await user_client.get_chat_member(chat_id, me.id)
         except Exception as e:
             await status_msg.edit_text(f"❌ Cannot access group\n\nError: {str(e)[:100]}\n\nMake sure:\n1. You are admin in the group\n2. Group link is correct\n3. You have ban permission")
+            processing_users.discard(user_id)
             return
         
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
             await status_msg.edit_text("❌ You are not an admin in this group")
+            processing_users.discard(user_id)
             return
         
         has_ban_right = False
@@ -113,6 +122,7 @@ async def startban(client, message):
         
         if not has_ban_right:
             await status_msg.edit_text("❌ You are admin but don't have ban permission")
+            processing_users.discard(user_id)
             return
         
         await status_msg.edit_text("📥 Fetching all members (this may take a while)...")
@@ -126,6 +136,7 @@ async def startban(client, message):
         
         if total == 0:
             await status_msg.edit_text("✅ No members to ban (only you and bot in group)")
+            processing_users.discard(user_id)
             return
         
         await status_msg.edit_text(f"🚀 Banning {total} members...\n⏱️ Estimated time: {total//50 + 2} seconds")
@@ -167,11 +178,17 @@ async def startban(client, message):
                 pass
         if user_id in temp_sessions:
             del temp_sessions[user_id]
+        processing_users.discard(user_id)
 
 @app.on_message(filters.private & filters.text & ~filters.command(["start", "startban"]))
 async def save_session(client, message):
-    session_string = message.text.strip()
     user_id = message.from_user.id
+    
+    if user_id in processing_users:
+        await message.reply_text("⏳ Please wait, your ban command is still processing")
+        return
+    
+    session_string = message.text.strip()
     
     if len(session_string) < 30:
         await message.reply_text("❌ Session string too short\n\nGenerate a valid session from:\nhttps://telegram.tools/session-string-generator")
@@ -181,16 +198,16 @@ async def save_session(client, message):
         await message.reply_text("❌ Invalid session format\n\nSession string should start with '1', 'BQ', or 'AQ'\n\nGenerate new session from:\nhttps://telegram.tools/session-string-generator")
         return
     
-    await message.reply_text("🔄 Validating your session...")
+    validation_msg = await message.reply_text("🔄 Validating your session...")
     
     is_valid, result = await validate_session(session_string, API_ID, API_HASH)
     
     if not is_valid:
-        await message.reply_text(f"❌ Invalid session\n\nError: {result[:150]}\n\nPlease generate a new session from:\nhttps://telegram.tools/session-string-generator")
+        await validation_msg.edit_text(f"❌ Invalid session\n\nError: {result[:150]}\n\nPlease generate a new session from:\nhttps://telegram.tools/session-string-generator")
         return
     
     temp_sessions[user_id] = session_string
-    await message.reply_text(
+    await validation_msg.edit_text(
         f"✅ Session valid!\n\n"
         f"Logged in as: {result.first_name} (@{result.username or 'no username'})\n\n"
         f"Now send:\n/startban group_link_or_id\n\n"
