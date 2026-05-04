@@ -20,7 +20,8 @@ API_HASH = get_env_var("API_HASH")
 BOT_TOKEN = get_env_var("BOT_TOKEN")
 
 temp_sessions = {}
-processing_users = set()
+processing_users = {}
+user_waiting_for_session = {}
 
 print("Starting Ban All Bot...")
 
@@ -58,38 +59,44 @@ async def ban_chunk(client, chat_id, user_chunk, semaphore):
 
 @app.on_message(filters.private & filters.command("start"))
 async def start(client, message):
+    user_id = message.from_user.id
+    user_waiting_for_session[user_id] = True
     await message.reply_text(
         "⚡ Ban All Bot\n\n"
-        "Send me your Pyrogram session string\n"
-        "Then use: /startban group_link_or_id\n\n"
-        "Get session from: https://telegram.tools/session-string-generator\n"
-        "Must have admin + ban permission"
+        "Please send me your Pyrogram session string\n\n"
+        "How to get session:\n"
+        "1. Go to: https://telegram.tools/session-string-generator\n"
+        "2. Enter your phone number\n"
+        "3. Enter verification code\n"
+        "4. Enter 2FA password (if enabled)\n"
+        "5. Copy the session string\n\n"
+        "Then send: /startban group_link_or_id"
     )
 
 @app.on_message(filters.private & filters.command("startban"))
 async def startban(client, message):
     user_id = message.from_user.id
     
-    if user_id in processing_users:
-        await message.reply_text("⏳ Please wait, your previous command is still processing")
+    if user_id in processing_users and processing_users[user_id] == True:
+        await message.reply_text("⏳ Please wait, your previous ban is still running")
         return
     
     if user_id not in temp_sessions:
-        await message.reply_text("❌ Please send your Pyrogram session string first")
+        await message.reply_text("❌ No session found\n\nPlease send your Pyrogram session string first")
         return
     
     if len(message.command) < 2:
         await message.reply_text("❌ Usage: /startban group_link_or_id\n\nExample: /startban https://t.me/yourgroup")
         return
     
-    processing_users.add(user_id)
+    processing_users[user_id] = True
     session_string = temp_sessions[user_id]
     chat_input = message.command[1]
     chat_id = extract_chat_id(chat_input)
     
     if not chat_id:
-        await message.reply_text("❌ Invalid group link or ID\n\nUse format: https://t.me/username or -100123456789")
-        processing_users.discard(user_id)
+        await message.reply_text("❌ Invalid group link or ID")
+        processing_users[user_id] = False
         return
     
     status_msg = await message.reply_text("🔍 Checking admin permissions...")
@@ -105,13 +112,13 @@ async def startban(client, message):
         try:
             member = await user_client.get_chat_member(chat_id, me.id)
         except Exception as e:
-            await status_msg.edit_text(f"❌ Cannot access group\n\nError: {str(e)[:100]}\n\nMake sure:\n1. You are admin in the group\n2. Group link is correct\n3. You have ban permission")
-            processing_users.discard(user_id)
+            await status_msg.edit_text(f"❌ Cannot access group\n\nMake sure you are admin in the group")
+            processing_users[user_id] = False
             return
         
         if member.status not in [ChatMemberStatus.ADMINISTRATOR, ChatMemberStatus.OWNER]:
             await status_msg.edit_text("❌ You are not an admin in this group")
-            processing_users.discard(user_id)
+            processing_users[user_id] = False
             return
         
         has_ban_right = False
@@ -121,11 +128,11 @@ async def startban(client, message):
             has_ban_right = True
         
         if not has_ban_right:
-            await status_msg.edit_text("❌ You are admin but don't have ban permission")
-            processing_users.discard(user_id)
+            await status_msg.edit_text("❌ You don't have ban permission")
+            processing_users[user_id] = False
             return
         
-        await status_msg.edit_text("📥 Fetching all members (this may take a while)...")
+        await status_msg.edit_text("📥 Fetching all members...")
         
         member_ids = []
         async for member_obj in user_client.get_chat_members(chat_id):
@@ -135,11 +142,11 @@ async def startban(client, message):
         total = len(member_ids)
         
         if total == 0:
-            await status_msg.edit_text("✅ No members to ban (only you and bot in group)")
-            processing_users.discard(user_id)
+            await status_msg.edit_text("✅ No members to ban")
+            processing_users[user_id] = False
             return
         
-        await status_msg.edit_text(f"🚀 Banning {total} members...\n⏱️ Estimated time: {total//50 + 2} seconds")
+        await status_msg.edit_text(f"🚀 Banning {total} members...")
         
         chunk_size = 50
         chunks = [member_ids[i:i + chunk_size] for i in range(0, len(member_ids), chunk_size)]
@@ -159,62 +166,51 @@ async def startban(client, message):
         await status_msg.edit_text(
             f"✅ BANNING COMPLETE\n\n"
             f"Banned: {banned_count}/{total}\n"
-            f"Time: {elapsed:.1f} seconds\n"
-            f"Speed: {banned_count/elapsed:.1f} users/sec"
+            f"Time: {elapsed:.1f} seconds"
         )
         
     except Exception as e:
-        error_msg = str(e)
-        if "RPCError" in error_msg:
-            await status_msg.edit_text(f"❌ Session error: Invalid or expired session\n\nPlease generate a new session from telegram.tools")
-        else:
-            await status_msg.edit_text(f"❌ Error: {error_msg[:150]}")
-        print(f"Error in startban: {e}")
+        await status_msg.edit_text(f"❌ Error: {str(e)[:100]}")
     finally:
         if user_client:
             try:
                 await user_client.stop()
             except:
                 pass
-        if user_id in temp_sessions:
-            del temp_sessions[user_id]
-        processing_users.discard(user_id)
+        processing_users[user_id] = False
 
 @app.on_message(filters.private & filters.text & ~filters.command(["start", "startban"]))
 async def save_session(client, message):
     user_id = message.from_user.id
     
-    if user_id in processing_users:
-        await message.reply_text("⏳ Please wait, your ban command is still processing")
+    if user_id in processing_users and processing_users[user_id] == True:
+        return
+    
+    if user_id in temp_sessions:
         return
     
     session_string = message.text.strip()
     
     if len(session_string) < 30:
-        await message.reply_text("❌ Session string too short\n\nGenerate a valid session from:\nhttps://telegram.tools/session-string-generator")
+        await message.reply_text("❌ Invalid session string\n\nGenerate from: https://telegram.tools/session-string-generator")
         return
     
-    if not session_string.startswith(("1", "BQ", "AQ")):
-        await message.reply_text("❌ Invalid session format\n\nSession string should start with '1', 'BQ', or 'AQ'\n\nGenerate new session from:\nhttps://telegram.tools/session-string-generator")
-        return
-    
-    validation_msg = await message.reply_text("🔄 Validating your session...")
+    validation_msg = await message.reply_text("🔄 Validating session...")
     
     is_valid, result = await validate_session(session_string, API_ID, API_HASH)
     
     if not is_valid:
-        await validation_msg.edit_text(f"❌ Invalid session\n\nError: {result[:150]}\n\nPlease generate a new session from:\nhttps://telegram.tools/session-string-generator")
+        await validation_msg.edit_text(f"❌ Invalid session\n\n{str(result)[:100]}\n\nGenerate new session from telegram.tools")
         return
     
     temp_sessions[user_id] = session_string
+    
     await validation_msg.edit_text(
-        f"✅ Session valid!\n\n"
-        f"Logged in as: {result.first_name} (@{result.username or 'no username'})\n\n"
-        f"Now send:\n/startban group_link_or_id\n\n"
-        f"⚠️ Session will be deleted after use"
+        f"✅ Session saved!\n\n"
+        f"Logged in as: {result.first_name}\n\n"
+        f"Now send:\n/startban https://t.me/yourgroup"
     )
 
 if __name__ == "__main__":
     print("Bot started successfully!")
-    print("Waiting for messages...")
     app.run()
